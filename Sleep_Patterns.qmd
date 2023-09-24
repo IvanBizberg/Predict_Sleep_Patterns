@@ -1,0 +1,334 @@
+---
+title: "Sleep_patterns"
+format: html
+editor: source
+---
+
+# Libraries
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(XML)
+library(methods)
+library(xml2)
+
+# Scrap data
+library(httr)
+library(rvest)
+```
+# set directory
+```{r}
+setwd("E:/Documents/Predict_Ivan/Kaggle")
+```
+# Read data
+
+```{r, eval=FALSE}
+df_xlm <- read_xml("E:/Documents/Predict_Ivan/Kaggle/raw_health_export.xml") %>% as_list()
+saveRDS(df_xlm, "df_xlm.RData")
+result <- xmlParse(file = "E:/Documents/Predict_Ivan/Kaggle/raw_health_export.xml")
+xmldataframe <- xmlToDataFrame("E:/Documents/Predict_Ivan/Kaggle/raw_health_export.xml")
+```
+
+# Import data that could help
+```{r}
+# location Rockville, Maryland, Montgomery, United States
+
+
+# Twitch
+
+# url <- read_html("https://twitchtracker.com/medallionstallion_/streams#duration")
+# streams <- url %>% html_node(xpath = '//*[@id="streams"]/tbody') %>% html_table()
+# write_csv(streams, "streams.csv")
+
+streams <- read_csv("streams.csv") %>% 
+  mutate(date = as.Date(X1, format = "%Y-%m-%d")) %>% 
+  mutate(hour = hour(X1), minute = minute(X1), second = second(X1)) %>% 
+  rename(time = X2) %>% 
+  select(date,time) %>% 
+  group_by(date) %>% summarise(time = sum(time))
+
+
+# Stock / Crypto
+
+library(quantmod)
+library(fHMM)
+
+ChangPerc <- function(New, Origin) {
+  ((New - Origin)/abs(Origin))*100
+}
+
+NASDAQ <- download_data(symbol = "^IXIC", file = NULL, verbose = FALSE, from = "2014-02-19") %>% 
+  mutate(return_NASDAQ = log(Close/Open),
+         MA_200 = SMA(Close, n = 200),
+         Price_MA200_NASDAQ = ChangPerc(MA_200, Close)) %>%
+  rename(date = Date) %>% mutate(date = ymd(date)) %>% 
+  select(date, return_NASDAQ, Price_MA200_NASDAQ) 
+
+new_BTC <- download_data(symbol = "BTC-USD", file = NULL, verbose = FALSE) %>% select(Date, Open, Close) %>% 
+  mutate(Date = ymd(Date)) %>% as_tibble() %>% mutate(Date = as.character(Date)) 
+
+mindate <- min(new_BTC$Date)
+
+old_BTC <- read_csv("coin_Bitcoin.csv") %>% mutate(Date = as.Date(Date, format = "%Y-%m-%d")) %>% 
+  select(Date, Open, Close) %>% filter(Date < mindate) %>% mutate(Date = as.character(Date))
+
+
+
+BTC <- bind_rows(old_BTC, new_BTC) %>% 
+  mutate(return_BTC = log(Close/Open),
+         MA_200 = SMA(Close, n = 200),
+         Price_MA200_BTC = ChangPerc(MA_200, Close)) %>%
+  rename(date = Date) %>% 
+  select(date, return_BTC, Price_MA200_BTC) %>% 
+  mutate(date = ymd(date))
+
+
+# Pollution
+
+air_2015 <- read_csv("E:/Documents/Predict_Ivan/Kaggle/air/ad_viz_plotval_data (1).csv")
+air_2016 <- read_csv("E:/Documents/Predict_Ivan/Kaggle/air/ad_viz_plotval_data (2).csv")
+air_2017 <- read_csv("E:/Documents/Predict_Ivan/Kaggle/air/ad_viz_plotval_data (3).csv")
+air_2018 <- read_csv("E:/Documents/Predict_Ivan/Kaggle/air/ad_viz_plotval_data (4).csv")
+air_2019 <- read_csv("E:/Documents/Predict_Ivan/Kaggle/air/ad_viz_plotval_data (5).csv")
+air_2020 <- read_csv("E:/Documents/Predict_Ivan/Kaggle/air/ad_viz_plotval_data (6).csv")
+air_2021 <- read_csv("E:/Documents/Predict_Ivan/Kaggle/air/ad_viz_plotval_data (7).csv")
+air_2022 <- read_csv("E:/Documents/Predict_Ivan/Kaggle/air/ad_viz_plotval_data (8).csv")
+air_2023 <- read_csv("E:/Documents/Predict_Ivan/Kaggle/air/ad_viz_plotval_data (9).csv")
+
+air <- bind_rows(
+  air_2015,
+  air_2016,
+  air_2017,
+  air_2018,
+  air_2019,
+  air_2020,
+  air_2021,
+  air_2022,
+  air_2023
+) %>% filter(COUNTY == "Montgomery") %>% 
+  mutate(Date = mdy(Date)) %>% select(Date, `Daily Mean PM2.5 Concentration`) %>% 
+  rename(date = Date)
+
+
+air %>% mutate(year = year(date)) %>% 
+  count(year)
+
+# weather
+
+# heath
+
+filenames <- list.files("E:/Documents/Predict_Ivan/Kaggle/Workout", pattern = "*.csv", full.names = T)
+
+ldf <- lapply(filenames, read_csv)
+
+function(data){
+  df <- ldf[[2]] %>% rename_with(tolower) %>% select(contains(c("startdate", "value"))) %>% 
+    mutate(startdate = ymd(startdate))
+}
+
+
+```
+
+# Import and merge data
+```{r}
+train <- read.csv("train.csv") %>% mutate(date = ymd(date)) %>% left_join(., streams) %>% mutate(time = if_else(is.na(time), 0, time)) %>% 
+  left_join(., NASDAQ) %>% left_join(., BTC) %>% 
+  mutate(return_NASDAQ = if_else(is.na(return_NASDAQ), 0, return_NASDAQ)) %>% 
+  fill(Price_MA200_NASDAQ, .direction = "down") %>% 
+  left_join(., air)
+test <- read.csv("test.csv") %>% mutate(date = ymd(date)) %>% left_join(., streams) %>% mutate(time = if_else(is.na(time), 0, time)) %>% 
+  left_join(., NASDAQ) %>% left_join(., BTC) %>% 
+  mutate(return_NASDAQ = if_else(is.na(return_NASDAQ), 0, return_NASDAQ)) %>% 
+  fill(Price_MA200_NASDAQ, .direction = "downup") %>% 
+  left_join(., air)
+```
+# Random
+```{r}
+n <- nrow(test)
+random_test <- runif(n = n, min = 2, max = 7) %>% round(., digits = 1)
+test$sleep_hours <- random_test
+
+write_csv(test, "predictions.csv")
+```
+
+
+# Exploratory analisis
+```{r}
+hist(train$sleep_hours)      
+min(train$date)      
+min(test$date)      
+max(train$date)      
+```
+
+
+# Model
+```{r}
+library(usemodels)
+use_ranger(sleep_hours ~ ., data = train)
+```
+## Recipe
+```{r}
+
+Holidays <- timeDate::listHolidays()
+
+ranger_recipe <- 
+  recipe(formula = sleep_hours ~ ., data = train) %>% step_date(date, features = c("month", "dow", "doy", "week", "decimal", "quarter", "semester", "year")) %>% step_holiday(date, holidays = Holidays) %>% 
+  step_impute_roll(`Daily Mean PM2.5 Concentration`, statistic = mean, window = 11) %>%
+  step_impute_knn(`Daily Mean PM2.5 Concentration`, neighbors = 3)
+rec_df <- prep(ranger_recipe) %>% juice(.)
+
+colSums(is.na(rec_df))
+```
+
+## Choose model
+```{r}
+ranger_spec <- 
+  rand_forest() %>% 
+  set_mode("regression") %>% 
+  set_engine("ranger") 
+```
+
+
+## Create workflow
+```{r}
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe) %>% 
+  add_model(ranger_spec) 
+```
+
+## Fit model with all data
+```{r}
+Model <- fit(ranger_workflow, train)
+```
+
+## Generate predictions
+```{r}
+Predictions <- predict(
+  Model, test
+) %>% pull()
+
+test$sleep_hours <- Predictions
+
+write_csv(test %>% select(date, sleep_hours), "Predictions_rf.csv")
+```
+
+
+# Tune Model
+```{r}
+folds <- vfold_cv(train)
+
+```
+
+## Choose model
+```{r}
+ranger_spec <- 
+  rand_forest(mtry = tune(), min_n = tune(), trees = tune()) %>% 
+  set_mode("regression") %>% 
+  set_engine("ranger") 
+```
+
+## Create workflow
+```{r}
+ranger_workflow <- 
+  workflow() %>% 
+  add_recipe(ranger_recipe) %>% 
+  add_model(ranger_spec) 
+```
+
+# Tune
+```{r}
+doParallel::registerDoParallel()
+
+
+ranger_tune <-
+  tune_grid(ranger_workflow, resamples = folds, grid = 11, metrics = metric_set(rmse))
+
+show_best(ranger_tune, metric = "rmse")
+autoplot(ranger_tune)
+
+# 38	1444	36	rmse	standard	1.047049	10	0.02370376	Preprocessor1_Model09
+
+Tuned_WF <- ranger_workflow %>% 
+  finalize_workflow(select_best(ranger_tune, metric = "rmse")) 
+
+
+# LastFit <- last_fit(Tuned_WF, split, metrics = metric_set(rmse))
+# collect_metrics(LastFit)
+
+# rmse = 1.088129
+```
+
+
+
+## Fit model with all data
+```{r}
+Model <- fit(Tuned_WF, train)
+```
+
+## Generate predictions
+```{r}
+Predictions <- predict(
+  Model, test
+) %>% pull()
+
+test$sleep_hours <- Predictions
+
+write_csv(test %>% select(date, sleep_hours), "Predictions_rf.csv")
+```
+
+
+# H2o
+```{r}
+library(h2o)
+h2o.init()
+
+df_h2o <- as.h2o(rec_df)
+
+df_split <- h2o.splitFrame(data = df_h2o, ratios = 0.8, seed = 1234)
+training_data <- df_split[[1]]
+test_data <- df_split[[2]]
+
+predictors <- rec_df %>% select(-sleep_hours) %>% names() 
+response <- "sleep_hours"
+
+rf_params <- list(ntrees = c(10, 100, 500, 1000),
+                  max_depth = c(30, 60, 100, 200),
+                  min_rows = c(10, 50, 100, 200))
+
+rf_grid <- h2o.grid("randomForest", 
+                    x = predictors, 
+                    y = response,
+                    grid_id = "rf_grid",
+                    training_frame = training_data,
+                    validation_frame = test_data,
+                    hyper_params = rf_params)
+
+
+h2o.getGrid(grid_id = "rf_grid",
+            sort_by = "rmse",
+            decreasing = TRUE)
+
+rf_grid <- h2o.grid("randomForest", 
+                    x = predictors, 
+                    y = response,
+                    ntrees = 500,
+                    max_depth = 5,
+                    min_rows = 5,
+                    training_frame = training_data,
+                    validation_frame = test_data)
+
+
+df_model <- h2o.randomForest(x = predictors,
+                             y = response,
+                             training_frame = training_data)
+
+ranger_recipe <- 
+  recipe(formula = sleep_hours ~ ., data = test) %>% step_date(date, features = c("month", "dow", "doy", "week", "decimal", "quarter", "semester", "year")) %>% step_holiday(date, holidays = Holidays)
+rec_df <- prep(ranger_recipe) %>% juice(.)
+
+
+test_predict <- h2o.predict(object = df_model, 
+                            newdata = rec_df)
+```
